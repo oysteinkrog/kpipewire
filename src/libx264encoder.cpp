@@ -33,16 +33,22 @@ LibX264Encoder::LibX264Encoder(H264Profile profile, PipeWireProduce *produce)
     : SoftwareEncoder(produce)
     , m_profile(profile)
 {
-    auto colorRange = m_colorRange == PipeWireBaseEncodedStream::ColorRange::Full ? u"full"_s : u"limited"_s;
-
-    // Adjust the filter graph to ensure we are using an even frame size using a
-    // pad filter. Otherwise the size adjustment below will insert a row/column
-    // of garbage instead of black.
-    m_filterGraphToParse = u"format=yuv420p,pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=%1"_s.arg(colorRange);
 }
 
 bool LibX264Encoder::initialize(const QSize &size)
 {
+    // Built here, not in the constructor: setColorRange() is only called after
+    // construction, so the constructor always saw the default (limited) range.
+    const bool fullRange = m_colorRange == PipeWireBaseEncodedStream::ColorRange::Full;
+    const auto colorRange = fullRange ? u"full"_s : u"limited"_s;
+
+    // Adjust the filter graph to ensure we are using an even frame size using a
+    // pad filter. Otherwise the size adjustment below will insert a row/column
+    // of garbage instead of black. The scale filter does the one RGB to YUV
+    // conversion (format= after it only fixes its output format), with BT.709,
+    // the matrix RDP clients and HD video decoders expect, instead of swscale's
+    // BT.601 default.
+    m_filterGraphToParse = u"pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=%1:out_color_matrix=bt709,format=yuv420p"_s.arg(colorRange);
     createFilterGraph(size);
 
     auto codec = avcodec_find_encoder_by_name("libx264");
@@ -68,6 +74,11 @@ bool LibX264Encoder::initialize(const QSize &size)
     m_avCodecContext->gop_size = 100;
     m_avCodecContext->pix_fmt = AV_PIX_FMT_YUV420P;
     m_avCodecContext->time_base = AVRational{1, 1000};
+    // Tag the stream to match the conversion above.
+    m_avCodecContext->color_range = fullRange ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+    m_avCodecContext->colorspace = AVCOL_SPC_BT709;
+    m_avCodecContext->color_primaries = AVCOL_PRI_BT709;
+    m_avCodecContext->color_trc = AVCOL_TRC_BT709;
 
     switch (m_profile) {
     case H264Profile::Baseline:
